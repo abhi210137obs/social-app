@@ -108,6 +108,11 @@ import {IS_ANDROID} from '#/env'
 import {usePostFeedQuery as useFollowingV2PostFeedQuery} from '#/features/followingV2/home/queries/postFeed'
 import {app} from '#/lexicons'
 import * as bsky from '#/types/bsky'
+import {
+  PlaybackSpeedBadge,
+  PlaybackSpeedProvider,
+  usePlaybackSpeed,
+} from './components/PlaybackSpeed'
 import {Scrubber, VIDEO_PLAYER_BOTTOM_INSET} from './components/Scrubber'
 
 function createThreeVideoPlayers(
@@ -167,7 +172,9 @@ export function VideoFeed({}: NativeStackScreenProps<
           ]}>
           <Header sourceContext={params} />
         </View>
-        <Feed />
+        <PlaybackSpeedProvider>
+          <Feed />
+        </PlaybackSpeedProvider>
       </Layout.Screen>
     </ThemeProvider>
   )
@@ -981,6 +988,8 @@ function Overlay({
             {player && (
               <PlayPauseTapArea
                 player={player}
+                active={active}
+                scrollGesture={scrollGesture}
                 post={post}
                 feedContext={feedContext}
                 reqId={reqId}
@@ -1225,11 +1234,15 @@ function VideoItemPlaceholder({
 
 function PlayPauseTapArea({
   player,
+  active,
+  scrollGesture,
   post,
   feedContext,
   reqId,
 }: {
   player: VideoPlayer
+  active: boolean
+  scrollGesture: NativeGesture
   post: Shadow<app.bsky.feed.defs.PostView>
   feedContext: string | undefined
   reqId: string | undefined
@@ -1249,6 +1262,7 @@ function PlayPauseTapArea({
     isPlaying: player.playing,
   })
   const isMounted = useRef(false)
+  const playbackSpeed = usePlaybackSpeed({player, active, scrollGesture})
 
   useEffect(() => {
     isMounted.current = true
@@ -1273,6 +1287,8 @@ function PlayPauseTapArea({
   })
 
   const onPress = () => {
+    // releasing a press-and-hold shouldn't also count as a tap
+    if (playbackSpeed.didHold()) return
     if (doubleTapRef.current) {
       clearTimeout(doubleTapRef.current)
       doubleTapRef.current = null
@@ -1290,18 +1306,30 @@ function PlayPauseTapArea({
   }
 
   return (
-    <Button
-      disabled={!player}
-      aria-valuetext={isPlaying ? l`Video is playing` : l`Video is paused`}
-      label={l`Video from ${sanitizeHandle(
-        post.author.handle,
-        '@',
-      )}. Tap to play or pause the video`}
-      accessibilityHint={l`Double tap to like`}
-      onPress={onPress}
-      style={[a.absolute, a.inset_0, a.z_10]}>
-      <View />
-    </Button>
+    <>
+      <GestureDetector gesture={playbackSpeed.gesture}>
+        <View style={[a.absolute, a.inset_0, a.z_10]}>
+          <Button
+            disabled={!player}
+            aria-valuetext={
+              isPlaying ? l`Video is playing` : l`Video is paused`
+            }
+            label={l`Video from ${sanitizeHandle(
+              post.author.handle,
+              '@',
+            )}. Tap to play or pause the video`}
+            accessibilityHint={l`Double tap to like`}
+            onPressIn={playbackSpeed.resetHold}
+            onPress={onPress}
+            style={[a.absolute, a.inset_0]}>
+            <View />
+          </Button>
+        </View>
+      </GestureDetector>
+      {playbackSpeed.showBadge && (
+        <PlaybackSpeedBadge speed={playbackSpeed.speed} />
+      )}
+    </>
   )
 }
 
