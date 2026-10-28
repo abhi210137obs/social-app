@@ -86,6 +86,13 @@ import {List} from '#/view/com/util/List'
 import {UserAvatar} from '#/view/com/util/UserAvatar'
 import {ThreadComposePrompt} from '#/screens/PostThread/components/ThreadComposePrompt'
 import {Header} from '#/screens/VideoFeed/components/Header'
+import {SpeedBadge} from '#/screens/VideoFeed/components/SpeedBadge'
+import {
+  DEFAULT_PLAYBACK_SPEED,
+  Provider as PlaybackSpeedProvider,
+  usePlaybackSpeed,
+  usePlaybackSpeedGesture,
+} from '#/screens/VideoFeed/state/playbackSpeed'
 import {atoms as a, ios, platform, ThemeProvider, useTheme} from '#/alf'
 import {setSystemUITheme} from '#/alf/util/systemUI'
 import {Button, ButtonIcon, ButtonText} from '#/components/Button'
@@ -112,6 +119,7 @@ import {Scrubber, VIDEO_PLAYER_BOTTOM_INSET} from './components/Scrubber'
 
 function createThreeVideoPlayers(
   sources?: [string, string, string],
+  playbackRate: number = DEFAULT_PLAYBACK_SPEED,
 ): [VideoPlayer, VideoPlayer, VideoPlayer] {
   // android is typically slower and can't keep up with a 0.1 interval
   const eventInterval = platform({
@@ -122,12 +130,15 @@ function createThreeVideoPlayers(
   const p1 = createVideoPlayer(sources?.[0] ?? '')
   p1.loop = true
   p1.timeUpdateEventInterval = eventInterval
+  p1.playbackRate = playbackRate
   const p2 = createVideoPlayer(sources?.[1] ?? '')
   p2.loop = true
   p2.timeUpdateEventInterval = eventInterval
+  p2.playbackRate = playbackRate
   const p3 = createVideoPlayer(sources?.[2] ?? '')
   p3.loop = true
   p3.timeUpdateEventInterval = eventInterval
+  p3.playbackRate = playbackRate
   return [p1, p2, p3]
 }
 
@@ -153,22 +164,25 @@ export function VideoFeed({}: NativeStackScreenProps<
 
   return (
     <ThemeProvider theme="dark">
-      <Layout.Screen
-        minimalShell
-        fullBleed
-        noInsetTop
-        style={{backgroundColor: 'black'}}>
-        <KeepAwake />
-        <View
-          style={[
-            a.absolute,
-            a.z_50,
-            {top: 0, left: 0, right: 0, paddingTop: top},
-          ]}>
-          <Header sourceContext={params} />
-        </View>
-        <Feed />
-      </Layout.Screen>
+      <PlaybackSpeedProvider>
+        <Layout.Screen
+          minimalShell
+          fullBleed
+          noInsetTop
+          style={{backgroundColor: 'black'}}>
+          <KeepAwake />
+          <View
+            style={[
+              a.absolute,
+              a.z_50,
+              {top: 0, left: 0, right: 0, paddingTop: top},
+            ]}>
+            <Header sourceContext={params} />
+          </View>
+          <SpeedBadge />
+          <Feed />
+        </Layout.Screen>
+      </PlaybackSpeedProvider>
     </ThemeProvider>
   )
 }
@@ -280,6 +294,24 @@ function Feed() {
 
   const scrollGesture = useNativeGesture()
 
+  const {stickySpeed, activeSpeed} = usePlaybackSpeed()
+
+  /*
+   * Players are pooled, so a transient press-and-hold speed has to be pinned to
+   * the one showing the active video while the other two stay at the speed the
+   * user will land on when they swipe. Also re-runs when sources change, so a
+   * player that just picked up a new video is never left on the wrong rate.
+   */
+  useEffect(() => {
+    if (!players) return
+    players.forEach((player, i) => {
+      const speed = i === currentIndex % 3 ? activeSpeed : stickySpeed
+      if (player.playbackRate !== speed) {
+        player.playbackRate = speed
+      }
+    })
+  }, [players, currentIndex, activeSpeed, stickySpeed, currentSources])
+
   const renderItem: ListRenderItem<VideoItem> = useCallback(
     ({item, index}) => {
       const {post, video} = item
@@ -343,7 +375,10 @@ function Feed() {
         if (prevVideo) args[(index + 2) % 3] = prevVideo
         if (currVideo) args[index % 3] = currVideo
         if (nextVideo) args[(index + 1) % 3] = nextVideo
-        const [player1, player2, player3] = createThreeVideoPlayers(args)
+        const [player1, player2, player3] = createThreeVideoPlayers(
+          args,
+          stickySpeed,
+        )
 
         setPlayers([player1, player2, player3])
 
@@ -410,7 +445,7 @@ function Feed() {
         setCurrentSources(updatedSources)
       }
     },
-    [videos, currentSources, players],
+    [videos, currentSources, players, stickySpeed],
   )
 
   const updateVideoStateInitially = useNonReactiveCallback(() => {
@@ -982,6 +1017,8 @@ function Overlay({
               <PlayPauseTapArea
                 player={player}
                 post={post}
+                active={active}
+                scrollGesture={scrollGesture}
                 feedContext={feedContext}
                 reqId={reqId}
               />
@@ -1226,17 +1263,25 @@ function VideoItemPlaceholder({
 function PlayPauseTapArea({
   player,
   post,
+  active,
+  scrollGesture,
   feedContext,
   reqId,
 }: {
   player: VideoPlayer
   post: Shadow<app.bsky.feed.defs.PostView>
+  active: boolean
+  scrollGesture: NativeGesture
   feedContext: string | undefined
   reqId: string | undefined
 }) {
   const {t: l} = useLingui()
   const doubleTapRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const haptics = useHaptics()
+  const {gesture: speedGesture, shouldSuppressPress} = usePlaybackSpeedGesture({
+    enabled: active,
+    scrollGesture,
+  })
   // TODO: implement viaRepost -sfn
   const [queueLike] = usePostLikeMutationQueue(
     post,
@@ -1273,6 +1318,8 @@ function PlayPauseTapArea({
   })
 
   const onPress = () => {
+    // Lifting out of a press and hold shouldn't also toggle play/pause.
+    if (shouldSuppressPress()) return
     if (doubleTapRef.current) {
       clearTimeout(doubleTapRef.current)
       doubleTapRef.current = null
@@ -1290,18 +1337,20 @@ function PlayPauseTapArea({
   }
 
   return (
-    <Button
-      disabled={!player}
-      aria-valuetext={isPlaying ? l`Video is playing` : l`Video is paused`}
-      label={l`Video from ${sanitizeHandle(
-        post.author.handle,
-        '@',
-      )}. Tap to play or pause the video`}
-      accessibilityHint={l`Double tap to like`}
-      onPress={onPress}
-      style={[a.absolute, a.inset_0, a.z_10]}>
-      <View />
-    </Button>
+    <GestureDetector gesture={speedGesture}>
+      <Button
+        disabled={!player}
+        aria-valuetext={isPlaying ? l`Video is playing` : l`Video is paused`}
+        label={l`Video from ${sanitizeHandle(
+          post.author.handle,
+          '@',
+        )}. Tap to play or pause the video`}
+        accessibilityHint={l`Double tap to like. Press and hold to play at double speed, then drag up or down to change the speed of every video`}
+        onPress={onPress}
+        style={[a.absolute, a.inset_0, a.z_10]}>
+        <View />
+      </Button>
+    </GestureDetector>
   )
 }
 
